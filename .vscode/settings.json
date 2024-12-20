@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "aes.h": "c",
+        "common.h": "c",
+        "private_access.h": "c"
+    }
+}
