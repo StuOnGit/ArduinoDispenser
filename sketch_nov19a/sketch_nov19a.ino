@@ -1,42 +1,118 @@
 #include <WiFiNINA.h>
 #include <SPI.h>
 #include <ArduinoECCX08.h>
+#include <EEPROM.h>
 
-#define SLOT_SSID 0    // Slot per salvare SSID
-#define SLOT_PASS 1    // Slot per salvare password
+#define SIGNATURE_ADDRESS 0  // Indirizzo della firma
+#define SIGNATURE_VALUE 0xA5 // Valore della firma
+#define PIN_RESET 7 // Pin a cui è collegato il PULSTANTE RESET(TE)
 
-unsigned int indexSSID = 0;
-unsigned int indexPassw = 0;
 const unsigned int MAX_LENGTH = 32;
 //TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
 char ssid[MAX_LENGTH];
 char password[MAX_LENGTH];
+char encrypted_ssid_and_pass[MAX_LENGTH];
+char key[MAX_LENGTH];
 // char pin[6]; // PIN per autorizzare l'accesso
 int status = WL_IDLE_STATUS;
 
-enum wifi_type{
-  TYPE_SSID,
-  TYPE_PASSWORD
-};
-
 int connectionStatus = WL_IDLE_STATUS;
 unsigned int triesToConnection = 3;
+
+void clearEncryptionData(){
+  clearEncryptedCredentialsSignature();
+  clearEncryptedCredentials();
+}
+
+void clearEncryptedCredentialsSignature() {
+  EEPROM.write(SIGNATURE_ADDRESS, 0xFF); // Resetta la firma
+}
+
+void clearEncryptedCredentials() {
+  for(int i = 0; i < sizeof(encrypted_ssid_and_pass); i++) {
+    EEPROM.write(SIGNATURE_ADDRESS + 1 + i, 0xFF); // Resetta la firma
+  }
+}
+
+bool encryptedCredentialsAreSaved() {
+  return EEPROM.read(SIGNATURE_ADDRESS) == SIGNATURE_VALUE;
+}
+
+void saveEncryptedCredentialsSignature() {
+  EEPROM.write(SIGNATURE_ADDRESS, SIGNATURE_VALUE);
+}
+
+void clearEncryptedCredentialsSignature() {
+  EEPROM.write(SIGNATURE_ADDRESS, 0xFF); // Resetta la firma
+}
 
 // TODO: da cambiare in booleano o stringa [vedere se è sicuro] per gestione di errore
 void requestWifiCredentials(){
     Serial.println("SSID:");
     // Evitare attacchi tipo DoS etc
-    secureReadInput(TYPE_SSID, ssid, sizeof(ssid));
+    secureReadInput(ssid, sizeof(ssid));
     Serial.println("PASSWORD:");
     // Evitare attacchi tipo DoS etc
-    secureReadInput(TYPE_PASSWORD, password, sizeof(password));
+    secureReadInput(password, sizeof(password));
+}
+
+void requestEncryptedWifiAndPassword(){
+  Serial.println("Encrypted SSID_and_Password:");
+  secureReadInput(encrypted_ssid_and_pass, sizeof(encrypted_ssid_and_pass));
+}
+
+void requestKey(){
+  Serial.println("KEY:");
+  secureReadInput(key, sizeof(key));
+}
+
+
+void saveEncryptedCredentialsToEEPROM(){
+  Serial.println("Saving encripted credentials..");
+  requestEncryptedWifiAndPassword();
+
+  int dataAddress = SIGNATURE_ADDRESS + 1; 
+  
+  Serial.println(encrypted_ssid_and_pass);
+  EEPROM.put(dataAddress, encrypted_ssid_and_pass);
+  saveEncryptedCredentialsSignature(); // Salva la firma
+  Serial.println("Credentials Saved");
+}
+
+
+char* readFromEEPROM(int address, int length){
+  if(length < EEPROM.length()){
+    char value;
+    char retString[length+1];
+    for(int i = 0; i < length; i++){
+      value = EEPROM.read(address+i);
+      retString[i] = value;
+    }
+    retString[length] = '\0';
+    Serial.print("Read from EEPROM:");
+    Serial.print("\t");
+    Serial.print(retString);
+  }else{
+    Serial.println("EEPROM Error: Length too big.");
+  }
 }
 
 void connectToWiFi() {
-  Serial.println("Connessione al Wifi...");
+  Serial.println("Connecting to WiFi...");
+  // Vedere se e' gia salvata
+  if(!encryptedCredentialsAreSaved()){
+    // salva il cifrato
+    saveEncryptedCredentialsToEEPROM(); 
+  }else{
+    Serial.println("Credentials already saved..");
+  }
+
+  // prendi il cifrato e decifralo con la chiave
+  // inserisci quindi in ssid e password e connettiti
+
   status = WiFi.begin(ssid, password);
   while(status != WL_CONNECTED){
-    delay(500);
+    delay(2000);
     Serial.println("...");
   }
   Serial.println("\nConnesso!");
@@ -49,35 +125,19 @@ void connectToWiFi() {
  - Controlli sulla lunghezza
  - Controlli sui termini speciali e non
  ***/
-void secureReadInput(wifi_type wifi_type, char* buffer, int length){
+void secureReadInput(char* buffer, int length){
   while (Serial.available() == 0){/*aspetta l'input*/}
-  if (wifi_type == TYPE_SSID){
-    while(Serial.available() && indexSSID < length-1){
+  int index = 0;
+    while(Serial.available() && index < length-1){
       char ch = Serial.read();
         if(ch != "\n" && ch != "\r"){
-          buffer[indexSSID] = ch;
-          indexSSID++;
+          buffer[index] = ch;
+          index++;
         }else if(ch == "\n" || ch == "\r"){
-          Serial.println("Trovato");
-          buffer[indexSSID]= "\0";
+          buffer[index]= "\0";
         }
         delay(10); // serve per scrivere altrimenti non funziona
-
-     
     }
-  }else if(wifi_type == TYPE_PASSWORD){
-    while(Serial.available() && (indexPassw < length-1)){
-      char ch = Serial.read();
-      if(ch != "\n"){
-        buffer[indexPassw] = ch;
-        indexPassw++;
-      }else if(ch == "\n"){
-        buffer[indexPassw]= "\0";
-      }
-      delay(10);  // serve per scrivere altrimenti non funziona
-    }
-  }
-
 }
 void initializeSecureElement(){
    if (!ECCX08.begin()) {
@@ -88,9 +148,17 @@ void initializeSecureElement(){
 
 void setup() {
   Serial.begin(9600);
+  pinMode(PIN_RESET, INPUT_PULLUP);
   while(!Serial){}
+  if (digitalRead(PIN_RESET) == LOW) {
+    Serial.println("Resetting.. Data bye bye");
+    clearEncryptionData();
+    Serial.println("Data gone..");
+  } else {
+    Serial.println("Normal Start..");
+  }
   initializeSecureElement();
-  requestWifiCredentials();
+  //requestWifiCredentials();
   //se va a buon fine
   connectToWiFi();
   //se va a buon fine tutto a posto!
