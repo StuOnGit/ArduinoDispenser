@@ -1,3 +1,4 @@
+#include <String.h>
 #include <WiFiNINA.h>
 #include <SPI.h>
 #include <ArduinoECCX08.h>
@@ -11,12 +12,12 @@
 #define AES_BLOCKLEN 16 
 
 
-const unsigned int MAX_LENGTH = 128;
+const unsigned int MAX_LENGTH = 256;
 //TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
-char ssid[MAX_LENGTH];
-char password[MAX_LENGTH];
-char encrypted_ssid_and_pass[MAX_LENGTH];
-char key[MAX_LENGTH];
+char ssid[64];
+char password[64];
+char encrypted_ssid_and_pass[129]; // + 1 per il terminatore
+char key[33];
 // char pin[6]; // PIN per autorizzare l'accesso
 int status = WL_IDLE_STATUS;
 int resetState = 0;
@@ -53,27 +54,28 @@ void saveEncryptedCredentialsSignature() {
 }
 
 
-// TODO: da cambiare in booleano o stringa [vedere se è sicuro] per gestione di errore
-void requestWifiCredentials(){
-    Serial.println("SSID:");
-    // Evitare attacchi tipo DoS etc
-    secureReadInput(ssid, sizeof(ssid));
-    Serial.println("PASSWORD:");
-    // Evitare attacchi tipo DoS etc
-    secureReadInput(password, sizeof(password));
+void requestEncryptedWifiAndPassword() {
+  Serial.println("First part of Encrypted SSID_and_Password (max 64 bytes):");
+  char temp1[65] = {0}; // Inizializza con 0
+  secureReadInput64byte(temp1, sizeof(temp1));
+
+  Serial.println("Second part of Encrypted SSID_and_Password (max 64 bytes):");
+  char temp2[65] = {0}; // Inizializza con 0
+  secureReadInput64byte(temp2, sizeof(temp2));
+
+  // Verifica la lunghezza dei due buffer prima di concatenarli
+  if (strlen(temp1) + strlen(temp2) >= sizeof(encrypted_ssid_and_pass)) {
+    Serial.println("Errore: Buffer concatenato troppo lungo!");
+    return;
+  }
+
+  // Concatenazione sicura
+  snprintf(encrypted_ssid_and_pass, sizeof(encrypted_ssid_and_pass), "%s%s", temp1, temp2);
+
+  Serial.print("Concatenato: ");
+  Serial.println(encrypted_ssid_and_pass);
 }
 
-
-void requestEncryptedWifiAndPassword(){
-  Serial.println("Encrypted SSID_and_Password:");
-  secureReadInput(encrypted_ssid_and_pass, sizeof(encrypted_ssid_and_pass));
-}
-
-
-void requestKey(){
-  Serial.println("KEY:");
-  secureReadInput(key, sizeof(key));
-}
 
 
 void saveEncryptedCredentialsToEEPROM(){
@@ -82,7 +84,8 @@ void saveEncryptedCredentialsToEEPROM(){
 
   int dataAddress = SIGNATURE_ADDRESS + 1; 
   
-  Serial.println(encrypted_ssid_and_pass);
+  
+ // Serial.println(encrypted_ssid_and_pass);
   EEPROM.put(dataAddress, encrypted_ssid_and_pass);
   saveEncryptedCredentialsSignature(); // Salva la firma
   Serial.println("Credentials Saved");
@@ -122,27 +125,48 @@ void decryptAES(const char* encryptedHex, const char* keyHex, char* out){
 }
 
 
-void decriptedToCredentials(){ // the standard is 'SSID,PASSWORD'
+void decriptedToCredentials() {
+  if (strlen(key) > 0) {
+    char encriptedCredentials[129] = {0};
+    char credentials[128] = {0}; // Adatta la dimensione al massimo previsto
 
+    readFromEEPROM(SIGNATURE_ADDRESS + 1, sizeof(encrypted_ssid_and_pass), encriptedCredentials);
+    decryptAES(encriptedCredentials, key, credentials);
+
+    Serial.println("Decriptato:");
+    Serial.println(credentials);
+  } else {
+    Serial.println("ERRORE: Chiave non valida!");
+  }
 }
 
 
-char* readFromEEPROM(int address, int length){
+
+void readFromEEPROM(int address, int length, char* out){
   if(length < EEPROM.length()){
     char value;
-    char retString[length+1];
-    for(int i = 0; i < length; i++){
+    for(int i = 0; i < length-1; i++){
       value = EEPROM.read(address+i);
-      retString[i] = value;
+      out[i] = value;
     }
-    retString[length] = '\0';
+    out[length] = "\0";
     Serial.print("Read from EEPROM:");
     Serial.print("\t");
-    Serial.print(retString);
+    Serial.print(out);
   }else{
     Serial.println("EEPROM Error: Length too big.");
   }
 }
+
+
+void readKey(){
+  Serial.println("Enter the key:");
+  secureReadInput64byte(key, sizeof(key));
+  Serial.println(key);
+  delay(100);
+  Serial.println("Key saved");
+}
+
 
 void connectToWiFi() {
   Serial.println("Connecting to WiFi...");
@@ -154,7 +178,12 @@ void connectToWiFi() {
     Serial.println("Credentials already saved..");
   }
 
-  // prendi il cifrato e decifralo con la chiave
+  
+ 
+  readKey(); // save the key
+  decriptedToCredentials(); // use the key and puts the values in ssid and password
+
+
   // inserisci quindi in ssid e password e connettiti
 
 /*
@@ -176,20 +205,43 @@ void connectToWiFi() {
  - Controlli sulla lunghezza
  - Controlli sui termini speciali e non
  ***/
-void secureReadInput(char* buffer, int length){
-  while (Serial.available() == 0){/*aspetta l'input*/}
-  int index = 0;
-    while(Serial.available() && index < length-1){
-      char ch = Serial.read();
-        if(ch != "\n" && ch != "\r"){
-          buffer[index] = ch;
-          index++;
-        }else if(ch == "\n" || ch == "\r"){
-          buffer[index]= "\0";
-        }
-        delay(10); // serve per scrivere altrimenti non funziona
-    }
+
+void clearSerialBuffer() {
+  while (Serial.available() > 0) {
+    Serial.read();
+    delay(10); // Piccola pausa per garantire che tutti i dati vengano letti
+  }
 }
+
+
+
+void secureReadInput64byte(char* buffer, int length) {
+  // Svuota il buffer seriale prima di leggere
+  clearSerialBuffer();
+
+  int index = 0;
+
+  while (index < length-1) {
+    while (Serial.available() > 0) {
+      char ch = Serial.read();
+
+      if (ch != '\n' && ch != '\r') {
+        buffer[index] = ch;
+        index++;
+      } else {
+        // Fine del messaggio
+        buffer[index] = '\0';
+        return;
+      }
+    }
+    delay(20);  // Piccolo ritardo per sincronizzazione
+  }
+  Serial.println(buffer);
+  buffer[index-1]  = '\0';  // Assicura che il messaggio termini
+}
+
+
+
 void initializeSecureElement(){
    if (!ECCX08.begin()) {
     Serial.println("Errore: Secure Element non trovato!");
@@ -198,7 +250,7 @@ void initializeSecureElement(){
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   pinMode(PIN_RED, OUTPUT);
   pinMode(PIN_RESET, INPUT_PULLUP);
   while(!Serial){}
@@ -207,13 +259,13 @@ void setup() {
     Serial.println("Resetting.. Data bye bye");
     clearEncryptionData();
     Serial.println("Data gone..");
-    delay(4000);
+    delay(2000);
     digitalWrite (PIN_RED, LOW);
   } else {
     Serial.print("Normal ");
   }
   Serial.println("Starting..");
- 
+
   connectToWiFi();
 }
 void loop() {
