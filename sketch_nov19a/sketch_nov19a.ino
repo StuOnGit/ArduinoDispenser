@@ -9,9 +9,8 @@
 #define SIGNATURE_VALUE 0xA5 // Valore della firma
 #define PIN_RESET 7 // Pin a cui è collegato il PULSTANTE RESET(TE)
 #define PIN_RED 6 // Pin del led rosso
-#define AES_BLOCKLEN 16 
 
-
+AESLib aesLib;
 const unsigned int MAX_LENGTH = 256;
 //TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
 char ssid[64];
@@ -91,50 +90,33 @@ void saveEncryptedCredentialsToEEPROM(){
   Serial.println("Credentials Saved");
 }
 
-
-void hexStringToByteArray(const char *hexString, byte *byteArray, size_t arraySize) {
-  for (size_t i = 0; i < arraySize; i++) {
-    sscanf(&hexString[i * 2], "%2hhx", &byteArray[i]);
-  }
-}
-
-
-void decryptAES(const char* encryptedHex, const char* keyHex, char* out){
-  byte aesKey[MAX_LENGTH];  
-  byte encryptedData[MAX_LENGTH];
-  byte iv[AES_BLOCKLEN]; // Vettore di inizializzazione
-
-  // Converti i dati esadecimali in array di byte
-  hexStringToByteArray(keyHex, aesKey, MAX_LENGTH);
-  hexStringToByteArray(encryptedHex, encryptedData, MAX_LENGTH);
-
-  // Estrai IV e messaggio cifrato
-  memcpy(iv, encryptedData, AES_BLOCKLEN); // I primi 16 byte sono l'IV
-  byte ciphertext[MAX_LENGTH - AES_BLOCKLEN];
-  memcpy(ciphertext, encryptedData + AES_BLOCKLEN, MAX_LENGTH - AES_BLOCKLEN);
-
-  // Configura AES
-  AESLib aesLib;
-  aesLib.gen_iv(iv); // Usa il vettore di inizializzazione estratto
-  aesLib.set_paddingmode((paddingMode)0); // Nessun padding (adatta al tuo schema)
-
-  // Decripta
-  aesLib.decrypt((char *)ciphertext, out, MAX_LENGTH - AES_BLOCKLEN, (char *)aesKey, MAX_LENGTH, iv);
-  out[MAX_LENGTH - AES_BLOCKLEN] = '\0'; // Aggiungi il terminatore
-
-}
-
-
 void decriptedToCredentials() {
   if (strlen(key) > 0) {
     char encriptedCredentials[129] = {0};
-    char credentials[128] = {0}; // Adatta la dimensione al massimo previsto
+    String credentials;
 
     readFromEEPROM(SIGNATURE_ADDRESS + 1, sizeof(encrypted_ssid_and_pass), encriptedCredentials);
-    decryptAES(encriptedCredentials, key, credentials);
+    
+    byte aes_key[16];
+    hexStringToByteArray(key, aes_key);
+    
+    credentials = decrypt_impl(String(encriptedCredentials), aes_key);
 
-    Serial.println("Decriptato:");
-    Serial.println(credentials);
+    int separatorPos = credentials.indexOf(',');
+     if (separatorPos != -1) {
+      // Estrai SSID e password
+      credentials.substring(0, separatorPos).toCharArray(ssid, 64);
+      credentials.substring(separatorPos + 1).toCharArray(password, 64);
+      
+      Serial.println("Decryption successful!");
+      Serial.print("SSID: ");
+      Serial.println(ssid);
+      Serial.print("PASSWORD:");
+      Serial.println(password);
+      // Non stampare la password per sicurezza
+    } else {
+      Serial.println("Error: Invalid credentials format");
+    }
   } else {
     Serial.println("ERRORE: Chiave non valida!");
   }
@@ -152,7 +134,7 @@ void readFromEEPROM(int address, int length, char* out){
     out[length] = "\0";
     Serial.print("Read from EEPROM:");
     Serial.print("\t");
-    Serial.print(out);
+    Serial.println(out);
   }else{
     Serial.println("EEPROM Error: Length too big.");
   }
@@ -170,19 +152,14 @@ void readKey(){
 
 void connectToWiFi() {
   Serial.println("Connecting to WiFi...");
-  // Vedere se e' gia salvata
   if(!encryptedCredentialsAreSaved()){
-    // salva il cifrato
     saveEncryptedCredentialsToEEPROM(); 
   }else{
     Serial.println("Credentials already saved..");
   }
 
-  
- 
   readKey(); // save the key
   decriptedToCredentials(); // use the key and puts the values in ssid and password
-
 
   // inserisci quindi in ssid e password e connettiti
 
@@ -249,6 +226,72 @@ void initializeSecureElement(){
   }
 }
 
+void printBytesAsHex(byte* data, int length) {
+  for (int i = 0; i < length; i++) {
+    if (data[i] < 0x10) {
+      Serial.print("0");  // Aggiunge uno 0 iniziale per valori come "0A"
+    }
+    Serial.print(data[i], HEX);  // Stampa il byte in esadecimale
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+
+void hexStringToByteArray(const char* hexString, byte* byteArray) {
+    // Calcola la lunghezza effettiva della stringa hex
+    int hexLength = strlen(hexString);
+    
+    // Processa due caratteri hex alla volta
+    for (int i = 0; i < hexLength; i += 2) {
+        // Crea un buffer temporaneo per i due caratteri hex
+        char hexByte[3];
+        hexByte[0] = hexString[i];
+        hexByte[1] = (i + 1 < hexLength) ? hexString[i + 1] : '0';  // Se la lunghezza è dispari, aggiungi '0'
+        hexByte[2] = '\0';
+        
+        // Converti i due caratteri hex in un byte
+        byteArray[i/2] = (byte)strtol(hexByte, NULL, 16);
+    }
+}
+
+String decrypt_impl(const String& msg, byte aes_key[]) {
+  int msgLen = msg.length();
+  if (msg.length() < N_BLOCK * 2) {
+    return "";
+  }
+  byte iv[N_BLOCK];
+
+  for (int i = 0; i < N_BLOCK; i++) {
+    iv[i] = strtol(msg.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+  }
+  //Stampa correttamente i bytes..!
+  String ciphertext = msg.substring(N_BLOCK * 2);
+  int ciphertextLength = ciphertext.length() / 2;
+  char decrypted[ciphertextLength + 1] = {0}; 
+
+  byte encryptedBytes[ciphertextLength];
+  for (int i = 0; i < ciphertextLength; i++) {
+    encryptedBytes[i] = strtol(ciphertext.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+  }
+  delay(1000);
+  aesLib.decrypt((const char*)encryptedBytes, ciphertextLength, (byte*)decrypted, aes_key, 16, iv);
+  
+  return String(decrypted);
+}
+
+void aesInit(){
+  Serial.flush();
+
+  delay(1000);
+
+  Serial.println("\n========\n");
+
+  Serial.println("\nAES INIT... paddingMode::ZeroLength");
+  aesLib.set_paddingmode(paddingMode::ZeroLength);
+
+}
+
+
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_RED, OUTPUT);
@@ -265,7 +308,7 @@ void setup() {
     Serial.print("Normal ");
   }
   Serial.println("Starting..");
-
+  aesInit();
   connectToWiFi();
 }
 void loop() {

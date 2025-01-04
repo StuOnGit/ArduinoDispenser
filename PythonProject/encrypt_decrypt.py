@@ -1,4 +1,6 @@
 import sys
+from tokenize import String
+
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
@@ -20,9 +22,14 @@ def encrypt_message(message):
 
 def decrypt_message(encrypted_message_with_iv, key):
     key = binascii.unhexlify(key)
+    print(f"key = {binascii.hexlify(key).decode()}")
     encrypted_message_with_iv = binascii.unhexlify(encrypted_message_with_iv)
 
+
     iv = encrypted_message_with_iv[:AES.block_size]
+    print(f"IV (byte): {iv}")
+    print(f"IV (hex): {binascii.hexlify(iv).decode()}")
+
     encrypted_message = encrypted_message_with_iv[AES.block_size:]
 
     cipher = AES.new(key, AES.MODE_CBC, iv)
