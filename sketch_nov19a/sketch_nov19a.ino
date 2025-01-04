@@ -163,7 +163,6 @@ void connectToWiFi() {
 
   // inserisci quindi in ssid e password e connettiti
 
-/*
   status = WiFi.begin(ssid, password);
   int timerExit = 4;
   while(status != WL_CONNECTED || timerExit == 0){
@@ -174,7 +173,7 @@ void connectToWiFi() {
   Serial.println("\nConnesso!");
   //DEBUG
   Serial.println(WiFi.localIP());
-  */
+  
 }
 
 /***
@@ -291,6 +290,9 @@ void aesInit(){
 
 }
 
+void waitForCommand(){
+  
+}
 
 void setup() {
   Serial.begin(115200);
@@ -312,6 +314,7 @@ void setup() {
   connectToWiFi();
 }
 void loop() {
+  waitForCommand();
   delay(100);
 }
 
