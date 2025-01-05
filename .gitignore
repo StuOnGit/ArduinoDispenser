@@ -1,4 +1,9 @@
 .venv/
 .idea/
-PythonProject/.idea/misc.xml
-PythonProject/.idea/PythonProject.iml
+.DS_Store
+# Ignora i file di configurazione dell'editor
+.vscode/
+*.sublime-project
+*.sublime-workspace
+# Ignora i file di log
+*.log

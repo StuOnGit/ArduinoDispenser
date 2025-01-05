@@ -1,9 +1,9 @@
 #include <String.h>
 #include <WiFiNINA.h>
 #include <SPI.h>
-#include <ArduinoECCX08.h>
 #include <EEPROM.h>
 #include <AESLib.h>
+
 
 #define SIGNATURE_ADDRESS 0  // Indirizzo della firma
 #define SIGNATURE_VALUE 0xA5 // Valore della firma
@@ -11,19 +11,15 @@
 #define PIN_RED 6 // Pin del led rosso
 
 AESLib aesLib;
+WiFiServer server(80);
 const unsigned int MAX_LENGTH = 256;
 //TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
-char ssid[64];
+char  ssid[64];
 char password[64];
 char encrypted_ssid_and_pass[129]; // + 1 per il terminatore
 char key[33];
 // char pin[6]; // PIN per autorizzare l'accesso
 int status = WL_IDLE_STATUS;
-int resetState = 0;
-
-int connectionStatus = WL_IDLE_STATUS;
-unsigned int triesToConnection = 3;
-
 
 void clearEncryptionData(){
   clearEncryptedCredentialsSignature();
@@ -109,11 +105,10 @@ void decriptedToCredentials() {
       credentials.substring(separatorPos + 1).toCharArray(password, 64);
       
       Serial.println("Decryption successful!");
-      Serial.print("SSID: ");
+      Serial.print("SSID:");
       Serial.println(ssid);
       Serial.print("PASSWORD:");
       Serial.println(password);
-      // Non stampare la password per sicurezza
     } else {
       Serial.println("Error: Invalid credentials format");
     }
@@ -151,6 +146,7 @@ void readKey(){
 
 
 void connectToWiFi() {
+  Serial.println("\n========\n");
   Serial.println("Connecting to WiFi...");
   if(!encryptedCredentialsAreSaved()){
     saveEncryptedCredentialsToEEPROM(); 
@@ -161,26 +157,28 @@ void connectToWiFi() {
   readKey(); // save the key
   decriptedToCredentials(); // use the key and puts the values in ssid and password
 
-  // inserisci quindi in ssid e password e connettiti
-
   status = WiFi.begin(ssid, password);
   int timerExit = 4;
-  while(status != WL_CONNECTED || timerExit == 0){
+  while(status != WL_CONNECTED && timerExit > 0){
     delay(1000);
     Serial.println("...");
+    Serial.println("Connessione WiFi fallita");
+    Serial.println((String)"Error value: " + status);
+    Serial.println("Riprovo...");
+    status = WiFi.begin(ssid, password);
     timerExit--;
   }
-  Serial.println("\nConnesso!");
-  //DEBUG
-  Serial.println(WiFi.localIP());
-  
+  if (status != WL_CONNECTED) {
+    Serial.println("Connessione WiFi fallita");
+    Serial.println((String)"Error value: " + status);
+    Serial.println("Riprovo...");
+    connectToWiFi();
+  } else {
+    Serial.println("Connessione WiFi riuscita");
+    Serial.println(WiFi.localIP());
+    server.begin();
+  }
 }
-
-/***
- TODO: renderlo veramente sicuro
- - Controlli sulla lunghezza
- - Controlli sui termini speciali e non
- ***/
 
 void clearSerialBuffer() {
   while (Serial.available() > 0) {
@@ -188,7 +186,6 @@ void clearSerialBuffer() {
     delay(10); // Piccola pausa per garantire che tutti i dati vengano letti
   }
 }
-
 
 
 void secureReadInput64byte(char* buffer, int length) {
@@ -214,26 +211,6 @@ void secureReadInput64byte(char* buffer, int length) {
   }
   Serial.println(buffer);
   buffer[index-1]  = '\0';  // Assicura che il messaggio termini
-}
-
-
-
-void initializeSecureElement(){
-   if (!ECCX08.begin()) {
-    Serial.println("Errore: Secure Element non trovato!");
-    while (true);
-  }
-}
-
-void printBytesAsHex(byte* data, int length) {
-  for (int i = 0; i < length; i++) {
-    if (data[i] < 0x10) {
-      Serial.print("0");  // Aggiunge uno 0 iniziale per valori come "0A"
-    }
-    Serial.print(data[i], HEX);  // Stampa il byte in esadecimale
-    Serial.print(" ");
-  }
-  Serial.println();
 }
 
 void hexStringToByteArray(const char* hexString, byte* byteArray) {
@@ -291,7 +268,37 @@ void aesInit(){
 }
 
 void waitForCommand(){
-  
+  WiFiClient client = server.available();
+  if(client) {
+    Serial.println("\n========\n");
+    Serial.println("New client");
+    if (!authenticateClient(client)){
+      Serial.println("Client not authenticated");
+      client.stop();
+      return;
+    }
+    while (client.connected()) {
+      if (client.available()) {
+        String request = client.readStringUntil('\r');
+        Serial.println(request);
+        if(request.equals("something")) {
+          giveFood();
+        }
+      }
+    }
+    client.stop();
+    Serial.println("Client disconnected");
+  }
+}
+
+bool authenticateClient(WiFiClient& client){
+  return true;
+}
+
+void giveFood(){
+  Serial.println("Giving food");
+  delay(1000);
+  Serial.println("Food given");
 }
 
 void setup() {
