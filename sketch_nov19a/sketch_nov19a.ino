@@ -3,7 +3,7 @@
 #include <SPI.h>
 #include <EEPROM.h>
 #include <AESLib.h>
-
+#include <ArduinoECCX08.h>
 
 #define SIGNATURE_ADDRESS 0  // Indirizzo della firma
 #define SIGNATURE_VALUE 0xA5 // Valore della firma
@@ -11,13 +11,15 @@
 #define PIN_RED 6 // Pin del led rosso
 
 AESLib aesLib;
-WiFiServer server(80);
+WiFiServer server(65);
 const unsigned int MAX_LENGTH = 256;
 //TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
-char  ssid[64];
+char ssid[64]; 
 char password[64];
 char encrypted_ssid_and_pass[129]; // + 1 per il terminatore
 char key[33];
+byte publicKey[64];
+byte clientPublicKey[64];
 // char pin[6]; // PIN per autorizzare l'accesso
 int status = WL_IDLE_STATUS;
 
@@ -86,6 +88,7 @@ void saveEncryptedCredentialsToEEPROM(){
   Serial.println("Credentials Saved");
 }
 
+
 void decriptedToCredentials() {
   if (strlen(key) > 0) {
     char encriptedCredentials[129] = {0};
@@ -99,14 +102,19 @@ void decriptedToCredentials() {
     credentials = decrypt_impl(String(encriptedCredentials), aes_key);
 
     int separatorPos = credentials.indexOf(',');
+    int endPos = credentials.indexOf('.');
      if (separatorPos != -1) {
       // Estrai SSID e password
       credentials.substring(0, separatorPos).toCharArray(ssid, 64);
-      credentials.substring(separatorPos + 1).toCharArray(password, 64);
-      
+      credentials.substring(separatorPos + 1, endPos).toCharArray(password, 64);
+
+
       Serial.println("Decryption successful!");
+      Serial.println((String)"Credentials length: " + credentials.length());
+      Serial.println((String)"SSID length: " + strlen(ssid));
       Serial.print("SSID:");
       Serial.println(ssid);
+      Serial.println((String)"Password length: " + strlen(password));
       Serial.print("PASSWORD:");
       Serial.println(password);
     } else {
@@ -116,6 +124,8 @@ void decriptedToCredentials() {
     Serial.println("ERRORE: Chiave non valida!");
   }
 }
+
+
 
 
 
@@ -255,7 +265,7 @@ String decrypt_impl(const String& msg, byte aes_key[]) {
   return String(decrypted);
 }
 
-void aesInit(){
+void initAes(){
   Serial.flush();
 
   delay(1000);
@@ -267,23 +277,26 @@ void aesInit(){
 
 }
 
-void waitForCommand(){
+void waitForCommand() {
   WiFiClient client = server.available();
-  if(client) {
+  if (client) {
     Serial.println("\n========\n");
     Serial.println("New client");
-    if (!authenticateClient(client)){
-      Serial.println("Client not authenticated");
-      client.stop();
-      return;
-    }
-    while (client.connected()) {
+    // if (!authenticateClient(client)){
+    //   Serial.println("Client not authenticated");
+    //   client.stop();
+    //   return;
+    // }
+
+    unsigned long timeout = millis();
+    while (client.connected() && (millis() - timeout < 5000)) { // Timeout di 5 secondi
       if (client.available()) {
         String request = client.readStringUntil('\r');
         Serial.println(request);
-        if(request.equals("something")) {
+        if (request.equals("giveFood")) { 
           giveFood();
         }
+        timeout = millis(); // Resetta il timeout se ci sono dati
       }
     }
     client.stop();
@@ -291,7 +304,23 @@ void waitForCommand(){
   }
 }
 
+
+//TODO: Implementare la verifica della firma
 bool authenticateClient(WiFiClient& client){
+  client.write(publicKey, sizeof(publicKey));
+  Serial.println("Public key sent");
+
+  int bytesRead = client.readBytes(clientPublicKey, sizeof(clientPublicKey));
+  if (bytesRead != sizeof(clientPublicKey)) {
+    Serial.println("ERROR: Failed to receive client's public key");
+    return false;
+  }
+  Serial.print("Client public key received: ");
+  for (int i = 0; i < sizeof(clientPublicKey); i++) {
+    Serial.print(clientPublicKey[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
   return true;
 }
 
@@ -299,6 +328,37 @@ void giveFood(){
   Serial.println("Giving food");
   delay(1000);
   Serial.println("Food given");
+}
+
+
+void initAsymmetricKeysProtocol(){
+  Serial.println("\n========\n");
+  if (!ECCX08.begin()) {
+    Serial.println("ERROR: Failed to initialize ECCX08");
+    delay(2000);
+    initAsymmetricKeysProtocol();
+  }
+
+  /*
+  if (!ECCX08.generatePrivateKey(0)) {
+    Serial.println("ERROR: Failed to generate private key");
+    delay(2000);
+    initAsymmetricKeysProtocol();
+  }
+  
+
+  if (!ECCX08.generatePublicKey(0, publicKey)) {
+    Serial.println("ERROR: Failed to generate public key");
+    delay(2000);
+    initAsymmetricKeysProtocol();
+  }
+  */
+  Serial.println("PUBLIC KEY generated:");
+  for (int i = 0; i < 64; i++) {
+    Serial.print(publicKey[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
 }
 
 void setup() {
@@ -317,11 +377,12 @@ void setup() {
     Serial.print("Normal ");
   }
   Serial.println("Starting..");
-  aesInit();
+  initAes();
+  initAsymmetricKeysProtocol();
   connectToWiFi();
 }
 void loop() {
   waitForCommand();
-  delay(100);
+  delay(1000);
 }
 
