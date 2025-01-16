@@ -4,24 +4,120 @@
 #include <EEPROM.h>
 #include <AESLib.h>
 #include <ArduinoECCX08.h>
+#include <Stepper.h>
+#include <ArduinoJson.h>
 
 #define SIGNATURE_ADDRESS 0  // Indirizzo della firma
 #define SIGNATURE_VALUE 0xA5 // Valore della firma
 #define PIN_RESET 7 // Pin a cui è collegato il PULSTANTE RESET(TE)
 #define PIN_RED 6 // Pin del led rosso
+#define TEMPKEY_SLOT 0xFFFF
 
+static const char *HTTP_RES = "HTTP/1.0 200 OK\r\n"
+                              "Connection: close\r\n"
+                              "Content-Length: 62\r\n"
+                              "Content-Type: text/html; charset=iso-8859-1\r\n"
+                              "\r\n"
+                              "<html>\r\n"
+                              "<body>\r\n"
+                              "<p>Hello from ESP8266!</p>\r\n"
+                              "</body>\r\n"
+                              "</html>\r\n";
+
+// AesLib per crittografia simmetrica
 AESLib aesLib;
-WiFiServer server(65);
-const unsigned int MAX_LENGTH = 256;
-//TIM-88839994, d4U7hf5kDUKt6ThHud9RHuCQ
+
+// Config. del server
+const int serverPort = 69;
+WiFiServer server(serverPort);
+
+
+//Config. del jsonParser
+StaticJsonDocument<200> doc;
+
+// Config. del WIFI
 char ssid[64]; 
 char password[64];
 char encrypted_ssid_and_pass[129]; // + 1 per il terminatore
-char key[33];
-byte publicKey[64];
-byte clientPublicKey[64];
-// char pin[6]; // PIN per autorizzare l'accesso
 int status = WL_IDLE_STATUS;
+
+// Chiave simmetrica per WIFI / Anche per nonce di hmac
+char key[33];
+
+// Config. SHA256 per HMAC
+byte mySHA[32];
+
+// Config. per lo stepper
+const int stepsPerRevolution = 2048;
+Stepper stepper = Stepper(stepsPerRevolution, 2,3,4,5);
+
+
+void initHMAC(){
+  if (!ECCX08.begin()) {
+    Serial.println("Failed to communicate with ECC508/ECC608!");
+    while (1);
+  }
+
+  // if (!ECCX08.locked()) {
+  //   Serial.println("The ECC508/ECC608 is not locked!");
+  //   while (1);
+  // }
+
+ 
+}
+
+
+
+void doHMAC(String message, byte out[]){
+  byte messageBytes[message.length()];
+  message.getBytes(messageBytes, message.length()+1);
+
+  Serial.print("Message length: ");
+  Serial.println(message.length());
+  Serial.print("Message bytes: ");
+  for(int i=0; i<sizeof(messageBytes); i++){
+    printHex(messageBytes[i]);
+    Serial.print(" ");
+  }
+
+  // byte resultHMAC[32];
+  byte byteKey[32];
+  if(strlen(key) > 0){
+    hexStringToByteArray(key, byteKey);
+      // Perform nonce
+    if (!ECCX08.nonce(byteKey))
+    {
+        Serial.println("Failed to perform nonce.");
+        while (1);
+    }
+
+    if (!ECCX08.beginHMAC(TEMPKEY_SLOT)) {
+          Serial.println("Failed to start HMAC operation.");
+          while (1);
+    }
+    int dataLength = sizeof(messageBytes);
+    if (!ECCX08.updateHMAC(messageBytes, dataLength)) {
+      Serial.println("Failed to update HMAC operation.");
+      while (1);
+    }
+    if (!ECCX08.endHMAC(out)) {
+      Serial.println("Failed to end HMAC operation");
+      while (1);
+    }
+
+    Serial.print("HMAC result: ");
+    for (int i = 0; i < 32 ; i++) { // 32 bytes per l'HMAC
+          char hexChar[2];
+          sprintf(hexChar, "%02X", out[i]);
+          Serial.print(hexChar);
+          Serial.print(" ");
+    }
+  }else {
+     Serial.println("Failed to extract key in HMAC operation.");
+      while (1);
+  }
+
+}
 
 void clearEncryptionData(){
   clearEncryptedCredentialsSignature();
@@ -50,6 +146,12 @@ void saveEncryptedCredentialsSignature() {
   EEPROM.write(SIGNATURE_ADDRESS, SIGNATURE_VALUE);
 }
 
+void printHex(uint8_t num) {
+  char hexCar[2];
+
+  sprintf(hexCar, "%02X", num);
+  Serial.print(hexCar);
+}
 
 void requestEncryptedWifiAndPassword() {
   Serial.println("First part of Encrypted SSID_and_Password (max 64 bytes):");
@@ -124,9 +226,17 @@ void decriptedToCredentials() {
     Serial.println("ERRORE: Chiave non valida!");
   }
 }
-
-
-
+    
+// Verifica se un HMAC è valido
+bool verifyHMAC(const String message, byte receivedHMAC[]) {
+  byte out[32];
+  doHMAC(message, out);
+  if (strcmp(receivedHMAC, out) == 0){
+    return true;
+  }else{
+    return false;
+  }
+}
 
 
 void readFromEEPROM(int address, int length, char* out){
@@ -156,6 +266,12 @@ void readKey(){
 
 
 void connectToWiFi() {
+  Serial.println("\n========\n");
+  Serial.println("Configuring the  WiFi...");
+  IPAddress localIP(192, 168, 1, 100); // IP statico desiderato
+  IPAddress gateway(192, 168, 1, 1);   // Gateway (di solito l'indirizzo del router)
+  IPAddress subnet(255, 255, 255, 0);  // Subnet mask
+  WiFi.config(localIP, gateway, subnet);
   Serial.println("\n========\n");
   Serial.println("Connecting to WiFi...");
   if(!encryptedCredentialsAreSaved()){
@@ -280,91 +396,100 @@ void initAes(){
 void waitForCommand() {
   WiFiClient client = server.available();
   if (client) {
-    Serial.println("\n========\n");
-    Serial.println("New client");
-    // if (!authenticateClient(client)){
-    //   Serial.println("Client not authenticated");
-    //   client.stop();
-    //   return;
-    // }
+    Serial.println("Nuova connessione!");
+    String request = "";
+    String body = "";
 
-    unsigned long timeout = millis();
-    while (client.connected() && (millis() - timeout < 5000)) { // Timeout di 5 secondi
+    // Leggi i dati dalla richiesta HTTP
+    while (client.connected()) {
       if (client.available()) {
-        String request = client.readStringUntil('\r');
-        Serial.println(request);
-        if (request.equals("giveFood")) { 
-          giveFood();
+        char c = client.read();
+        request += c;
+        // Controlla se siamo nel corpo del messaggio POST
+        if (request.endsWith("\r\n\r\n")) {
+          while (client.available()) {
+            body += (char)client.read();
+          }
+          break;
         }
-        timeout = millis(); // Resetta il timeout se ci sono dati
       }
     }
+
+    Serial.println("Richiesta completa:");
+    Serial.println(request);
+    Serial.println("Body ricevuto:");
+    Serial.println(body);
+
+    // Analizza il JSON ricevuto
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+      Serial.print("Errore nel parsing JSON: ");
+      Serial.println(error.f_str());
+      client.println("HTTP/1.1 400 Bad Request");
+      client.println("Content-Type: text/plain");
+      client.println();
+      client.println("Errore nel parsing JSON");
+    } else {
+      const char* hmac = doc["HMAC"];
+      const char* command = doc["Command"];
+      Serial.print("HMAC: ");
+      Serial.println(hmac);
+      Serial.print("Command: ");
+      Serial.println(command);
+
+      // Verifica delle stringhe
+
+       // if(verifyHMAC("giveFood", receivedHMAC) == true){
+      //   String command = doc["Command"];
+      //   if (command.equals("giveFood")){
+      //     giveFood();
+      //   }
+      // }else{
+      //   Serial.println("HMAC Not verified");
+      // }
+
+      
+      if (strcmp(command, "giveFood") == 0 && verifyHMAC(command, hmac)== 0) {
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-Type: application/json");
+        client.println();
+        client.println("{\"status\":\"success\"}");
+
+        giveFood();
+      } else {
+        client.println("HTTP/1.1 400 Bad Request");
+        client.println("Content-Type: application/json");
+        client.println();
+        client.println("{\"status\":\"error\",\"message\":\"Valori non validi\"}");
+      }
+    }
+    // Chiudi la connessione
     client.stop();
-    Serial.println("Client disconnected");
-  }
+    Serial.println("Connessione chiusa.");
+  }  
 }
 
 
 //TODO: Implementare la verifica della firma
-bool authenticateClient(WiFiClient& client){
-  client.write(publicKey, sizeof(publicKey));
-  Serial.println("Public key sent");
-
-  int bytesRead = client.readBytes(clientPublicKey, sizeof(clientPublicKey));
-  if (bytesRead != sizeof(clientPublicKey)) {
-    Serial.println("ERROR: Failed to receive client's public key");
-    return false;
-  }
-  Serial.print("Client public key received: ");
-  for (int i = 0; i < sizeof(clientPublicKey); i++) {
-    Serial.print(clientPublicKey[i], HEX);
-    Serial.print(" ");
-  }
-  Serial.println();
-  return true;
+bool isACorrectMessage(String HMAC, String command){
+  //if(verifyHMAC(command, ))
 }
 
 void giveFood(){
   Serial.println("Giving food");
+  stepper.step(stepsPerRevolution);
   delay(1000);
   Serial.println("Food given");
 }
 
 
-void initAsymmetricKeysProtocol(){
-  Serial.println("\n========\n");
-  if (!ECCX08.begin()) {
-    Serial.println("ERROR: Failed to initialize ECCX08");
-    delay(2000);
-    initAsymmetricKeysProtocol();
-  }
-
-  /*
-  if (!ECCX08.generatePrivateKey(0)) {
-    Serial.println("ERROR: Failed to generate private key");
-    delay(2000);
-    initAsymmetricKeysProtocol();
-  }
-  
-
-  if (!ECCX08.generatePublicKey(0, publicKey)) {
-    Serial.println("ERROR: Failed to generate public key");
-    delay(2000);
-    initAsymmetricKeysProtocol();
-  }
-  */
-  Serial.println("PUBLIC KEY generated:");
-  for (int i = 0; i < 64; i++) {
-    Serial.print(publicKey[i], HEX);
-    Serial.print(" ");
-  }
-  Serial.println();
-}
-
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_RED, OUTPUT);
   pinMode(PIN_RESET, INPUT_PULLUP);
+  stepper.setSpeed(5);
   while(!Serial){}
   if (digitalRead(PIN_RESET) == HIGH) {
     digitalWrite (PIN_RED, HIGH);
@@ -378,8 +503,9 @@ void setup() {
   }
   Serial.println("Starting..");
   initAes();
-  initAsymmetricKeysProtocol();
+  initHMAC();
   connectToWiFi();
+ 
 }
 void loop() {
   waitForCommand();
