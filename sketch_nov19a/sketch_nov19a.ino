@@ -6,12 +6,16 @@
 #include <ArduinoECCX08.h>
 #include <Stepper.h>
 #include <ArduinoJson.h>
+#include "sha256.h"
+
 
 #define SIGNATURE_ADDRESS 0  // Indirizzo della firma
 #define SIGNATURE_VALUE 0xA5 // Valore della firma
 #define PIN_RESET 7 // Pin a cui è collegato il PULSTANTE RESET(TE)
 #define PIN_RED 6 // Pin del led rosso
-#define TEMPKEY_SLOT 0xFFFF
+
+// per mappare gli esadecimali
+const char hexMap[] PROGMEM = "0123456789abcdef";
 
 static const char *HTTP_RES = "HTTP/1.0 200 OK\r\n"
                               "Connection: close\r\n"
@@ -42,7 +46,7 @@ char encrypted_ssid_and_pass[129]; // + 1 per il terminatore
 int status = WL_IDLE_STATUS;
 
 // Chiave simmetrica per WIFI / Anche per nonce di hmac
-char key[33];
+char key[32];
 
 // Config. SHA256 per HMAC
 byte mySHA[32];
@@ -58,66 +62,8 @@ void initHMAC(){
     while (1);
   }
 
-  // if (!ECCX08.locked()) {
-  //   Serial.println("The ECC508/ECC608 is not locked!");
-  //   while (1);
-  // }
-
- 
 }
 
-
-
-void doHMAC(String message, byte out[]){
-  byte messageBytes[message.length()];
-  message.getBytes(messageBytes, message.length()+1);
-
-  Serial.print("Message length: ");
-  Serial.println(message.length());
-  Serial.print("Message bytes: ");
-  for(int i=0; i<sizeof(messageBytes); i++){
-    printHex(messageBytes[i]);
-    Serial.print(" ");
-  }
-
-  // byte resultHMAC[32];
-  byte byteKey[32];
-  if(strlen(key) > 0){
-    hexStringToByteArray(key, byteKey);
-      // Perform nonce
-    if (!ECCX08.nonce(byteKey))
-    {
-        Serial.println("Failed to perform nonce.");
-        while (1);
-    }
-
-    if (!ECCX08.beginHMAC(TEMPKEY_SLOT)) {
-          Serial.println("Failed to start HMAC operation.");
-          while (1);
-    }
-    int dataLength = sizeof(messageBytes);
-    if (!ECCX08.updateHMAC(messageBytes, dataLength)) {
-      Serial.println("Failed to update HMAC operation.");
-      while (1);
-    }
-    if (!ECCX08.endHMAC(out)) {
-      Serial.println("Failed to end HMAC operation");
-      while (1);
-    }
-
-    Serial.print("HMAC result: ");
-    for (int i = 0; i < 32 ; i++) { // 32 bytes per l'HMAC
-          char hexChar[2];
-          sprintf(hexChar, "%02X", out[i]);
-          Serial.print(hexChar);
-          Serial.print(" ");
-    }
-  }else {
-     Serial.println("Failed to extract key in HMAC operation.");
-      while (1);
-  }
-
-}
 
 void clearEncryptionData(){
   clearEncryptedCredentialsSignature();
@@ -226,16 +172,30 @@ void decriptedToCredentials() {
     Serial.println("ERRORE: Chiave non valida!");
   }
 }
-    
-// Verifica se un HMAC è valido
-bool verifyHMAC(const String message, byte receivedHMAC[]) {
-  byte out[32];
-  doHMAC(message, out);
-  if (strcmp(receivedHMAC, out) == 0){
-    return true;
-  }else{
-    return false;
-  }
+
+// finalmente!
+
+bool verifyHMAC(const String& message, const String& receivedHMAC) {
+
+        // this is actually the RFC4231 4.3 test
+        Sha256.initHmac((uint8_t * ) key, 32);
+        Sha256.print(message);
+        uint8_t * result = Sha256.resultHmac();
+
+        Serial.print("Expect: "); Serial.println(receivedHMAC);
+        Serial.print(  "Got   : ");
+
+        String calculatedHMAC = "";
+        for (int i = 0; i < 32; i++) {
+          char upperNibble = (char)pgm_read_byte(hexMap + (result[i] >> 4));
+          char lowerNibble = (char)pgm_read_byte(hexMap + (result[i] & 0xf));
+          calculatedHMAC += upperNibble;
+          calculatedHMAC += lowerNibble;
+        }
+        Serial.println(calculatedHMAC);
+        Serial.print("\n");
+
+        return calculatedHMAC.equalsIgnoreCase(receivedHMAC);
 }
 
 
@@ -438,25 +398,17 @@ void waitForCommand() {
       Serial.println(hmac);
       Serial.print("Command: ");
       Serial.println(command);
+    
 
-      // Verifica delle stringhe
+      if (strcmp(command, "giveFood") == 0){
+        Serial.println("givefood good");
+      }
 
-       // if(verifyHMAC("giveFood", receivedHMAC) == true){
-      //   String command = doc["Command"];
-      //   if (command.equals("giveFood")){
-      //     giveFood();
-      //   }
-      // }else{
-      //   Serial.println("HMAC Not verified");
-      // }
-
-      
-      if (strcmp(command, "giveFood") == 0 && verifyHMAC(command, hmac)== 0) {
+      if (strcmp(command, "giveFood") == 0 && verifyHMAC(command, hmac) == true) {
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: application/json");
         client.println();
         client.println("{\"status\":\"success\"}");
-
         giveFood();
       } else {
         client.println("HTTP/1.1 400 Bad Request");
@@ -471,18 +423,23 @@ void waitForCommand() {
   }  
 }
 
-
-//TODO: Implementare la verifica della firma
-bool isACorrectMessage(String HMAC, String command){
-  //if(verifyHMAC(command, ))
-}
-
 void giveFood(){
   Serial.println("Giving food");
   stepper.step(stepsPerRevolution);
   delay(1000);
   Serial.println("Food given");
 }
+
+
+void printHex(const char* label, byte* data, int len) {
+    Serial.print(label);
+    for(int i = 0; i < len; i++) {
+        if(data[i] < 0x10) Serial.print("0");
+        Serial.print(data[i], HEX);
+    }
+    Serial.println();
+}
+
 
 
 void setup() {
